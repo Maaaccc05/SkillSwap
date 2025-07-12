@@ -32,13 +32,12 @@ export default function Home() {
       const response = await fetch('http://localhost:5001/api/users/search');
       if (response.ok) {
         const userData = await response.json();
-        // Map backend fields to frontend expected fields
+        // Map backend fields to frontend expected fields (keep full objects for offers/wants)
         const mappedUsers = userData.map(u => ({
           ...u,
-          offers: u.skillsOffered ? u.skillsOffered.map(s => s.name) : [],
-          wants: u.skillsWanted ? u.skillsWanted.map(s => s.name) : [],
+          offers: u.skillsOffered ? u.skillsOffered : [],
+          wants: u.skillsWanted ? u.skillsWanted : [],
         }));
-        // Don't exclude current user - let them see themselves in the list
         setUsers(mappedUsers);
       } else {
         setError('Failed to fetch users');
@@ -50,7 +49,7 @@ export default function Home() {
     }
   };
 
-  const handleSkillRequest = async (userId, skillName) => {
+  const handleSkillRequest = async (skillOfferId, skillName) => {
     if (!isAuthenticated) {
       alert('Please login to request skills');
       navigate('/login');
@@ -62,8 +61,21 @@ export default function Home() {
 
     try {
       const token = localStorage.getItem('token');
-      // For now, just show a success message since we need to implement the full skill request system
-      alert('Skill request sent successfully! (Demo mode)');
+      const response = await fetch(`http://localhost:5001/api/skills/${skillOfferId}/request`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ message })
+      });
+
+      if (response.ok) {
+        alert('Skill request sent successfully!');
+      } else {
+        const errorData = await response.json();
+        alert(errorData.message || 'Failed to send request');
+      }
     } catch (error) {
       console.error('Error sending skill request:', error);
       alert('Failed to send request');
@@ -79,11 +91,25 @@ export default function Home() {
 
     try {
       const token = localStorage.getItem('token');
-      // For now, just navigate to chat with a demo chat ID
-      navigate(`/chat/demo-${userId}`);
+      const response = await fetch('http://localhost:5001/api/chat/start', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ otherUserId: userId })
+      });
+
+      if (response.ok) {
+        const chatData = await response.json();
+        navigate(`/chat/${chatData._id}`);
+      } else {
+        const errorData = await response.json();
+        alert(errorData.message || 'Failed to start chat');
+      }
     } catch (error) {
       console.error('Error starting chat:', error);
-      alert('Failed to start chat');
+      alert('Failed to start chat. Please try again.');
     }
   };
 
@@ -101,8 +127,8 @@ export default function Home() {
   // Filter users based on search criteria
   const filteredUsers = users.filter(user => {
     const matchesSkill = !skillQuery || 
-      user.offers.some(skill => skill.toLowerCase().includes(skillQuery.toLowerCase())) ||
-      user.wants.some(skill => skill.toLowerCase().includes(skillQuery.toLowerCase()));
+      user.offers.some(skill => skill.name.toLowerCase().includes(skillQuery.toLowerCase())) ||
+      user.wants.some(skill => skill.name.toLowerCase().includes(skillQuery.toLowerCase()));
     
     const matchesAvailability = !availability || 
       user.availability.some(avail => avail.toLowerCase().includes(availability.toLowerCase()));
@@ -257,6 +283,53 @@ export default function Home() {
 }
 
 function UserCard({ user, isAuthenticated, onSkillRequest, onStartChat, onViewProfile }) {
+  const [showModal, setShowModal] = useState(false);
+  const [selectedSkill, setSelectedSkill] = useState("");
+  const [realOffers, setRealOffers] = useState([]);
+  const [loadingOffers, setLoadingOffers] = useState(false);
+  const [offersError, setOffersError] = useState("");
+
+  const handleRequestClick = async () => {
+    setShowModal(true);
+    setLoadingOffers(true);
+    setOffersError("");
+    try {
+      const response = await fetch(`http://localhost:5001/api/skills?user=${user._id}`);
+      if (response.ok) {
+        const offers = await response.json();
+        setRealOffers(offers);
+        setSelectedSkill(offers.length > 0 ? offers[0]._id.toString() : "");
+      } else {
+        setOffersError("Could not load skills");
+        setRealOffers([]);
+        setSelectedSkill("");
+      }
+    } catch (err) {
+      setOffersError("Could not load skills");
+      setRealOffers([]);
+      setSelectedSkill("");
+    } finally {
+      setLoadingOffers(false);
+    }
+  };
+
+  const handleSendRequest = () => {
+    const skillObj = realOffers.find(s => s._id.toString() === selectedSkill);
+    if (skillObj) {
+      onSkillRequest(skillObj._id, skillObj.skill.name);
+      setShowModal(false);
+      setSelectedSkill("");
+      setRealOffers([]);
+    }
+  };
+
+  const handleCloseModal = () => {
+    setShowModal(false);
+    setSelectedSkill("");
+    setRealOffers([]);
+    setOffersError("");
+  };
+
   return (
     <div className="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow">
       <div className="p-6">
@@ -289,26 +362,26 @@ function UserCard({ user, isAuthenticated, onSkillRequest, onStartChat, onViewPr
           <SkillPills
             label="Offers"
             color="green"
-            skills={user.offers}
+            skills={user.offers.map(s => s.name)}
             icon="💡"
           />
           <SkillPills
             label="Wants"
             color="blue"
-            skills={user.wants}
+            skills={user.wants.map(s => s.name)}
             icon="🎯"
           />
         </div>
 
-                 {/* Availability */}
-         {user.availability && user.availability.length > 0 && (
-           <div className="flex items-center space-x-2 text-sm text-gray-600 mb-4">
-             <FaClock />
-             <span>{user.availability.map(avail => 
-               avail.charAt(0).toUpperCase() + avail.slice(1)
-             ).join(", ")}</span>
-           </div>
-         )}
+        {/* Availability */}
+        {user.availability && user.availability.length > 0 && (
+          <div className="flex items-center space-x-2 text-sm text-gray-600 mb-4">
+            <FaClock />
+            <span>{user.availability.map(avail =>
+              avail.charAt(0).toUpperCase() + avail.slice(1)
+            ).join(", ")}</span>
+          </div>
+        )}
 
         {/* Actions */}
         <div className="flex space-x-2">
@@ -326,18 +399,56 @@ function UserCard({ user, isAuthenticated, onSkillRequest, onStartChat, onViewPr
               >
                 Chat
               </button>
-              {user.offers.length > 0 && (
-                <button
-                  onClick={() => onSkillRequest(user._id, user.offers[0])}
-                  className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
-                >
-                  Request
-                </button>
-              )}
+              <button
+                onClick={handleRequestClick}
+                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+              >
+                Request
+              </button>
             </>
           )}
         </div>
       </div>
+      {/* Modal for selecting skill to request */}
+      {showModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-xs">
+            <h2 className="text-lg font-semibold mb-4">Select a Skill to Request</h2>
+            {loadingOffers ? (
+              <div className="text-gray-500 mb-4">Loading skills...</div>
+            ) : offersError ? (
+              <div className="text-red-500 mb-4">{offersError}</div>
+            ) : realOffers.length === 0 ? (
+              <div className="text-gray-500 mb-4">No skills available</div>
+            ) : (
+              <select
+                className="w-full border border-gray-300 rounded px-3 py-2 mb-4"
+                value={selectedSkill}
+                onChange={e => setSelectedSkill(e.target.value)}
+              >
+                {realOffers.map(skill => (
+                  <option key={skill._id} value={skill._id.toString()}>{skill.skill.name}</option>
+                ))}
+              </select>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={handleCloseModal}
+                className="px-3 py-1 rounded bg-gray-200 text-gray-700 hover:bg-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSendRequest}
+                disabled={!selectedSkill || realOffers.length === 0}
+                className="px-3 py-1 rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+              >
+                Send Request
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

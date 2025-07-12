@@ -17,7 +17,8 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "http://localhost:5173",
-    methods: ["GET", "POST", "PUT", "DELETE"]
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true
   }
 });
 
@@ -59,10 +60,24 @@ io.on("connection", (socket) => {
       const jwt = require('jsonwebtoken');
       const User = require('./models/user');
       
+      if (!token) {
+        socket.emit("auth_error", { message: "No token provided" });
+        return;
+      }
+
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       const user = await User.findById(decoded.id);
       
       if (user) {
+        // Remove any existing connection for this user
+        const existingSocketId = userSockets.get(user._id.toString());
+        if (existingSocketId && existingSocketId !== socket.id) {
+          const existingSocket = io.sockets.sockets.get(existingSocketId);
+          if (existingSocket) {
+            existingSocket.disconnect();
+          }
+        }
+
         connectedUsers.set(socket.id, user._id.toString());
         userSockets.set(user._id.toString(), socket.id);
         
@@ -73,10 +88,14 @@ io.on("connection", (socket) => {
         
         socket.emit("authenticated", { userId: user._id, name: user.name });
         socket.broadcast.emit("user_online", { userId: user._id, name: user.name });
+        
+        console.log(`User ${user.name} (${user._id}) authenticated on socket ${socket.id}`);
+      } else {
+        socket.emit("auth_error", { message: "User not found" });
       }
     } catch (error) {
       console.error('Socket authentication error:', error);
-      socket.emit("auth_error", { message: "Authentication failed" });
+      socket.emit("auth_error", { message: "Authentication failed: " + error.message });
     }
   });
 
@@ -91,12 +110,23 @@ io.on("connection", (socket) => {
         return;
       }
 
+      if (!chatId || !content) {
+        socket.emit("error", { message: "Missing chatId or content" });
+        return;
+      }
+
       // Save message to database
       const Chat = require('./models/chat');
       const chat = await Chat.findById(chatId);
       
       if (!chat) {
         socket.emit("error", { message: "Chat not found" });
+        return;
+      }
+
+      // Check if user is participant in this chat
+      if (!chat.participants.includes(senderId)) {
+        socket.emit("error", { message: "Not a participant in this chat" });
         return;
       }
 
@@ -111,12 +141,16 @@ io.on("connection", (socket) => {
       chat.lastMessage = new Date();
       await chat.save();
 
+      // Populate sender info for broadcasting
+      await chat.populate('messages.sender', 'name avatar');
+      const savedMessage = chat.messages[chat.messages.length - 1];
+
       // Broadcast to all participants in the chat
       chat.participants.forEach(participantId => {
         const participantSocketId = userSockets.get(participantId.toString());
         if (participantSocketId && participantSocketId !== socket.id) {
           io.to(participantSocketId).emit("message_received", {
-            ...message,
+            ...savedMessage.toObject(),
             chatId: chatId
           });
         }
@@ -124,13 +158,15 @@ io.on("connection", (socket) => {
 
       // Confirm message sent to sender
       socket.emit("message_sent", {
-        ...message,
+        ...savedMessage.toObject(),
         chatId: chatId
       });
 
+      console.log(`Message sent in chat ${chatId} by user ${senderId}`);
+
     } catch (error) {
       console.error('Send message error:', error);
-      socket.emit("error", { message: "Failed to send message" });
+      socket.emit("error", { message: "Failed to send message: " + error.message });
     }
   });
 
@@ -139,10 +175,10 @@ io.on("connection", (socket) => {
     const { chatId } = data;
     const senderId = connectedUsers.get(socket.id);
     
-    if (senderId) {
+    if (senderId && chatId) {
       const Chat = require('./models/chat');
       Chat.findById(chatId).then(chat => {
-        if (chat) {
+        if (chat && chat.participants.includes(senderId)) {
           chat.participants.forEach(participantId => {
             const participantSocketId = userSockets.get(participantId.toString());
             if (participantSocketId && participantSocketId !== socket.id) {
@@ -153,6 +189,8 @@ io.on("connection", (socket) => {
             }
           });
         }
+      }).catch(error => {
+        console.error('Error handling typing start:', error);
       });
     }
   });
@@ -161,10 +199,10 @@ io.on("connection", (socket) => {
     const { chatId } = data;
     const senderId = connectedUsers.get(socket.id);
     
-    if (senderId) {
+    if (senderId && chatId) {
       const Chat = require('./models/chat');
       Chat.findById(chatId).then(chat => {
-        if (chat) {
+        if (chat && chat.participants.includes(senderId)) {
           chat.participants.forEach(participantId => {
             const participantSocketId = userSockets.get(participantId.toString());
             if (participantSocketId && participantSocketId !== socket.id) {
@@ -175,6 +213,8 @@ io.on("connection", (socket) => {
             }
           });
         }
+      }).catch(error => {
+        console.error('Error handling typing stop:', error);
       });
     }
   });
@@ -196,10 +236,12 @@ io.on("connection", (socket) => {
         userSockets.delete(userId);
         
         socket.broadcast.emit("user_offline", { userId, name: user?.name });
+        console.log(`User ${user?.name} (${userId}) disconnected from socket ${socket.id}`);
       } catch (error) {
         console.error('Error handling disconnect:', error);
       }
     }
+    console.log(`Socket disconnected: ${socket.id}`);
   });
 });
 

@@ -12,6 +12,8 @@ const Chat = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [socket, setSocket] = useState(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [socketError, setSocketError] = useState('');
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -29,22 +31,60 @@ const Chat = () => {
 
   const setupSocket = () => {
     const token = localStorage.getItem('token');
-    if (!token) return;
+    if (!token) {
+      setSocketError('No authentication token found');
+      return;
+    }
 
     const newSocket = io('http://localhost:5001', {
-      auth: {
-        token: token
-      }
+      timeout: 5000,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
     });
 
     newSocket.on('connect', () => {
       console.log('Connected to chat server');
+      setIsConnected(true);
+      setSocketError('');
+      // Authenticate the socket connection
+      newSocket.emit('authenticate', token);
+    });
+
+    newSocket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error);
+      setIsConnected(false);
+      setSocketError('Connection failed. Messages will still be sent via HTTP.');
+    });
+
+    newSocket.on('authenticated', (data) => {
+      console.log('Socket authenticated:', data);
+      setSocketError('');
+    });
+
+    newSocket.on('auth_error', (data) => {
+      console.error('Socket authentication failed:', data);
+      setSocketError('Authentication failed. Messages will still be sent via HTTP.');
+      setIsConnected(false);
     });
 
     newSocket.on('message_received', (message) => {
+      // Only add if the message is NOT from the current user
       if (message.chatId === chatId) {
-        setMessages(prev => [...prev, message]);
+        const senderId = message.sender._id || message.sender;
+        if (senderId !== currentUserId) {
+          setMessages(prev => [...prev, message]);
+        }
       }
+    });
+
+    newSocket.on('message_sent', (message) => {
+      console.log('Message sent confirmation:', message);
+    });
+
+    newSocket.on('error', (error) => {
+      console.error('Socket error:', error);
+      setSocketError(error.message || 'Connection error. Messages will still be sent via HTTP.');
     });
 
     newSocket.on('user_typing', (data) => {
@@ -55,6 +95,23 @@ const Chat = () => {
     newSocket.on('user_stopped_typing', (data) => {
       // Remove typing indicators here
       console.log('User stopped typing:', data);
+    });
+
+    newSocket.on('disconnect', (reason) => {
+      console.log('Disconnected from chat server:', reason);
+      setIsConnected(false);
+      if (reason === 'io server disconnect') {
+        // the disconnection was initiated by the server, reconnect manually
+        newSocket.connect();
+      }
+    });
+
+    newSocket.on('reconnect', (attemptNumber) => {
+      console.log('Reconnected to chat server after', attemptNumber, 'attempts');
+      setIsConnected(true);
+      setSocketError('');
+      // Re-authenticate after reconnection
+      newSocket.emit('authenticate', token);
     });
 
     setSocket(newSocket);
@@ -83,7 +140,8 @@ const Chat = () => {
         setChat(chatData);
         setMessages(chatData.messages || []);
       } else {
-        setError('Failed to load chat');
+        const errorData = await response.json();
+        setError(errorData.message || 'Failed to load chat');
       }
     } catch (error) {
       console.error('Error fetching chat:', error);
@@ -95,8 +153,67 @@ const Chat = () => {
 
   const sendMessage = async (e) => {
     e.preventDefault();
-    if (!newMessage.trim() || !socket) return;
+    if (!newMessage.trim()) return;
 
+    const messageContent = newMessage.trim();
+    setNewMessage('');
+
+    // If socket is connected, send via socket first
+    if (socket && isConnected) {
+      try {
+        // Send via socket for real-time
+        socket.emit('send_message', {
+          chatId: chatId,
+          content: messageContent,
+          messageType: 'text'
+        });
+        
+        // Add message to local state immediately for better UX
+        const tempMessage = {
+          sender: currentUserId,
+          content: messageContent,
+          messageType: 'text',
+          timestamp: new Date(),
+          _id: Date.now() // Temporary ID
+        };
+        setMessages(prev => [...prev, tempMessage]);
+        
+        // Listen for confirmation from socket
+        const handleMessageSent = (message) => {
+          if (message.chatId === chatId) {
+            // Replace temp message with real one from server
+            setMessages(prev => prev.map(msg => 
+              msg._id === tempMessage._id ? message : msg
+            ));
+            socket.off('message_sent', handleMessageSent);
+          }
+        };
+        
+        socket.on('message_sent', handleMessageSent);
+        
+        // Fallback to HTTP if socket doesn't respond within 3 seconds
+        setTimeout(() => {
+          socket.off('message_sent', handleMessageSent);
+          // Check if message was confirmed
+          const messageExists = messages.some(msg => 
+            msg.content === messageContent && msg.sender === currentUserId
+          );
+          if (!messageExists) {
+            sendViaHTTP(messageContent);
+          }
+        }, 3000);
+        
+      } catch (error) {
+        console.error('Socket send error:', error);
+        sendViaHTTP(messageContent);
+      }
+    } else {
+      // Socket not connected, send via HTTP
+      sendViaHTTP(messageContent);
+    }
+  };
+
+  const sendViaHTTP = async (messageContent) => {
     try {
       const token = localStorage.getItem('token');
       const response = await fetch(`http://localhost:5001/api/chat/${chatId}/messages`, {
@@ -106,34 +223,40 @@ const Chat = () => {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          content: newMessage.trim(),
+          content: messageContent,
           messageType: 'text'
         })
       });
 
       if (response.ok) {
         const messageData = await response.json();
-        setMessages(prev => [...prev, messageData]);
-        setNewMessage('');
-        
-        // Emit to socket for real-time
-        socket.emit('send_message', {
-          chatId: chatId,
-          content: newMessage.trim(),
-          messageType: 'text'
+        // Only add if not already added by socket
+        setMessages(prev => {
+          const exists = prev.some(msg => 
+            msg.content === messageContent && 
+            msg.sender === currentUserId &&
+            Math.abs(new Date(msg.timestamp) - new Date(messageData.timestamp)) < 5000
+          );
+          return exists ? prev : [...prev, messageData];
         });
       } else {
-        alert('Failed to send message');
+        const errorData = await response.json();
+        alert(errorData.message || 'Failed to send message');
+        // Restore the message if sending failed
+        setNewMessage(messageContent);
       }
     } catch (error) {
-      console.error('Error sending message:', error);
+      console.error('Error sending message via HTTP:', error);
       alert('Failed to send message');
+      // Restore the message if sending failed
+      setNewMessage(messageContent);
     }
   };
 
   const handleTyping = (e) => {
     setNewMessage(e.target.value);
-    if (socket) {
+    // Only emit typing events if socket is connected
+    if (socket && isConnected) {
       socket.emit('typing_start', { chatId });
       clearTimeout(window.typingTimer);
       window.typingTimer = setTimeout(() => {
@@ -192,8 +315,21 @@ const Chat = () => {
               </p>
             </div>
           </div>
+          <div className="flex items-center space-x-2">
+            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+            <span className="text-xs text-gray-500">{isConnected ? 'Connected' : 'Disconnected'}</span>
+          </div>
         </div>
       </div>
+
+      {/* Socket Error Warning */}
+      {socketError && (
+        <div className="max-w-4xl mx-auto px-4 py-2">
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+            <p className="text-yellow-800 text-sm">{socketError}</p>
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="max-w-4xl mx-auto px-4 py-6">
@@ -206,7 +342,8 @@ const Chat = () => {
               </div>
             ) : (
               messages.map((message, index) => {
-                const isOwnMessage = message.sender === currentUserId;
+                // Fix the comparison by converting both to strings
+                const isOwnMessage = message.sender._id === currentUserId || message.sender === currentUserId;
                 return (
                   <div
                     key={index}
