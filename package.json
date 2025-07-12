@@ -1,0 +1,35 @@
+{
+  "name": "skillswap",
+  "version": "1.0.0",
+  "description": "A skill exchange platform built with React and Node.js",
+  "scripts": {
+    "setup": "node setup.js",
+    "install:backend": "cd backend && npm install",
+    "install:frontend": "cd frontend && npm install",
+    "install:all": "npm run install:backend && npm run install:frontend",
+    "dev:backend": "cd backend && npm run server",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "build": "cd frontend && npm run build",
+    "start": "cd backend && npm start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "keywords": [
+    "skill-exchange",
+    "react",
+    "nodejs",
+    "express",
+    "mongodb",
+    "socket.io"
+  ],
+  "author": "SkillSwap Team",
+  "license": "MIT",
+  "dependencies": {
+    "@daily-co/daily-js": "^0.80.0",
+    "date-fns": "^4.1.0",
+    "react-datepicker": "^8.4.0",
+    "react-hook-form": "^7.60.0"
+  }
+}
